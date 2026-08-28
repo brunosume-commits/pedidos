@@ -445,6 +445,10 @@
   </div>
 </div>
 
+<div class="modal-backdrop" id="editarPedidoModalBackdrop">
+  <div class="modal" style="max-width:640px;"></div>
+</div>
+
 <div class="modal-backdrop" id="exportModalBackdrop">
   <div class="modal" style="max-width:640px;">
     <h3>📤 Exportar relatório</h3>
@@ -1110,6 +1114,28 @@
     if (/[;"\n]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
     return s;
   }
+
+  // Agora que o sistema não roda mais dentro do sandbox da plataforma de Artifact,
+  // dá pra baixar o arquivo de verdade (antes isso era bloqueado e só sobrava o
+  // modal de copiar/colar). Mantemos o modal como plano B, caso o navegador
+  // bloqueie o download por algum motivo.
+  function baixarArquivoTexto(nomeArquivo, texto, mime) {
+    try {
+      var blob = new Blob(["\ufeff" + texto], { type: (mime || "text/csv") + ";charset=utf-8;" });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = nomeArquivo;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+      showToast("Relatório baixado: " + nomeArquivo);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
   printModalBackdrop.addEventListener("click", function (e) { if (e.target === printModalBackdrop) printModalBackdrop.classList.remove("show"); });
 
   // Em algumas telas o window.print() só abre a caixa se a janela estiver com foco — por isso
@@ -1183,6 +1209,7 @@
         '</select></td>' +
         '<td><div class="row-actions">' +
           '<button class="btn btn-secondary btn-sm" data-pagtoggle="' + p.id + '">' + (p.statusPagamento === "Pago" ? "Marcar pendente" : "Marcar pago") + '</button>' +
+          '<button class="btn btn-secondary btn-sm" data-editar="' + p.id + '">✏️ Editar</button>' +
           '<button class="btn btn-ghost btn-sm" data-print="' + p.id + '">🖨️ Imprimir</button>' +
           '<button class="btn btn-danger btn-sm" data-del="' + p.id + '">Excluir</button>' +
         '</div></td>' +
@@ -1218,6 +1245,9 @@
     mainEl.querySelectorAll("[data-print]").forEach(function (btn) {
       btn.addEventListener("click", function () { printReceipt(btn.getAttribute("data-print")); });
     });
+    mainEl.querySelectorAll("[data-editar]").forEach(function (btn) {
+      btn.addEventListener("click", function () { abrirEditarPedido(btn.getAttribute("data-editar")); });
+    });
     mainEl.querySelectorAll("[data-del]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         confirmarAcao("Excluir este pedido?", function () {
@@ -1227,6 +1257,106 @@
       });
     });
   }
+
+  // ---------------- Editar pedido (adicionar/remover item, ajustar taxa e observações) ----------------
+  // Trabalha numa cópia local do pedido — só grava de verdade em state.pedidos quando o usuário
+  // clica "Salvar alterações", pra não bagunçar o pedido original se ele desistir no meio.
+  var pedidoEditando = null;
+
+  function abrirEditarPedido(id) {
+    var p = state.pedidos.find(function (x) { return x.id === id; });
+    if (!p) return;
+    pedidoEditando = JSON.parse(JSON.stringify(p));
+    renderEditarPedidoModal();
+    document.getElementById("editarPedidoModalBackdrop").classList.add("show");
+  }
+
+  function fecharEditarPedidoModal() {
+    document.getElementById("editarPedidoModalBackdrop").classList.remove("show");
+    pedidoEditando = null;
+  }
+
+  function recalcularTotalEdicao() {
+    var totalItens = pedidoEditando.itens.reduce(function (s, i) { return s + i.preco * i.qtd; }, 0);
+    pedidoEditando.total = totalItens + (pedidoEditando.valorEntrega || 0);
+  }
+
+  function renderEditarPedidoModal() {
+    if (!pedidoEditando) return;
+    var p = pedidoEditando;
+    var itensHtml = p.itens.map(function (item, idx) {
+      var desc = item.tipo === "avulso" ? item.nome : (item.grupoNome + " " + item.tamanhoNome + (item.escolhas && item.escolhas.length ? ' <span class="muted" style="font-size:12px;">— ' + escapeHtml(item.escolhas.join(", ")) + '</span>' : ""));
+      return '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);">' +
+        '<div style="flex:1;font-size:13px;">' + (item.tipo === "avulso" ? escapeHtml(desc) : desc) + '</div>' +
+        '<input type="number" min="1" step="1" value="' + item.qtd + '" data-editqtd="' + idx + '" style="width:56px;">' +
+        '<span style="width:76px;text-align:right;font-size:13px;">' + money(item.preco) + '</span>' +
+        '<button class="btn btn-danger btn-sm" data-editdel="' + idx + '">Remover</button>' +
+      '</div>';
+    }).join("");
+
+    var modal = document.querySelector("#editarPedidoModalBackdrop .modal");
+    modal.innerHTML =
+      '<h3>✏️ Editar pedido #' + p.numero + ' — ' + escapeHtml(p.clienteNome) + '</h3>' +
+      '<div style="max-height:280px;overflow:auto;margin:10px 0;">' + (itensHtml || '<div class="muted" style="font-size:13px;">Nenhum item no pedido.</div>') + '</div>' +
+      '<div class="inline-add" style="margin-bottom:12px;">' +
+        '<div class="field" style="flex:2;"><label>Adicionar item</label><input type="text" id="editNovoItemNome" placeholder="Ex.: Refrigerante lata"></div>' +
+        '<div class="field small"><label>Preço (R$)</label><input type="number" id="editNovoItemPreco" min="0" step="0.5" placeholder="6.00"></div>' +
+        '<button class="btn btn-secondary btn-sm" id="btnEditAddItem">+ Adicionar</button>' +
+      '</div>' +
+      '<div class="field"><label>Taxa de entrega (R$)</label><input type="number" id="editValorEntrega" min="0" step="0.5" value="' + (p.valorEntrega || 0) + '"></div>' +
+      '<div class="field"><label>Observações</label><textarea id="editObs">' + escapeHtml(p.obs || "") + '</textarea></div>' +
+      '<div style="text-align:right;font-weight:700;font-size:17px;margin:12px 0;">Total: ' + money(p.total) + '</div>' +
+      '<div class="modal-actions">' +
+        '<button class="btn btn-ghost" id="editPedidoCancelar">Cancelar</button>' +
+        '<button class="btn btn-primary" id="editPedidoSalvar">Salvar alterações</button>' +
+      '</div>';
+
+    modal.querySelectorAll("[data-editqtd]").forEach(function (inp) {
+      inp.addEventListener("change", function () {
+        var idx = parseInt(inp.getAttribute("data-editqtd"), 10);
+        var v = parseInt(inp.value, 10);
+        pedidoEditando.itens[idx].qtd = (isNaN(v) || v < 1) ? 1 : v;
+        recalcularTotalEdicao();
+        renderEditarPedidoModal();
+      });
+    });
+    modal.querySelectorAll("[data-editdel]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var idx = parseInt(btn.getAttribute("data-editdel"), 10);
+        pedidoEditando.itens.splice(idx, 1);
+        recalcularTotalEdicao();
+        renderEditarPedidoModal();
+      });
+    });
+    modal.querySelector("#btnEditAddItem").addEventListener("click", function () {
+      var nome = modal.querySelector("#editNovoItemNome").value.trim();
+      var preco = parseFloat(modal.querySelector("#editNovoItemPreco").value);
+      if (!nome || isNaN(preco) || preco < 0) { showToast("Preencha o nome e o preço do item."); return; }
+      pedidoEditando.itens.push({ tipo: "avulso", nome: nome, preco: preco, qtd: 1 });
+      recalcularTotalEdicao();
+      renderEditarPedidoModal();
+    });
+    modal.querySelector("#editValorEntrega").addEventListener("change", function (e) {
+      var v = parseFloat(e.target.value);
+      pedidoEditando.valorEntrega = isNaN(v) ? 0 : v;
+      recalcularTotalEdicao();
+      renderEditarPedidoModal();
+    });
+    modal.querySelector("#editObs").addEventListener("input", function (e) { pedidoEditando.obs = e.target.value; });
+    modal.querySelector("#editPedidoCancelar").addEventListener("click", fecharEditarPedidoModal);
+    modal.querySelector("#editPedidoSalvar").addEventListener("click", function () {
+      var idxState = state.pedidos.findIndex(function (x) { return x.id === pedidoEditando.id; });
+      if (idxState !== -1) state.pedidos[idxState] = pedidoEditando;
+      saveState();
+      fecharEditarPedidoModal();
+      renderPedidos();
+      showToast("Pedido atualizado.");
+    });
+  }
+
+  document.getElementById("editarPedidoModalBackdrop").addEventListener("click", function (e) {
+    if (e.target === document.getElementById("editarPedidoModalBackdrop")) fecharEditarPedidoModal();
+  });
 
   // ================= Cardápio do dia (admin) =================
   function renderCardapio() {
@@ -1305,8 +1435,6 @@
       '<div class="card">' +
         '<div class="field-row">' +
           '<div class="field" style="max-width:200px;"><label>Data do cardápio</label><input type="date" id="cdData" value="' + cardapioAdminData + '"></div>' +
-          '<div class="field" style="max-width:160px;"><label>Pedidos até</label><input type="text" id="cdHoraLimite" placeholder="09:00" value="' + (cd ? escapeHtml(cd.horaLimite || "") : "") + '"></div>' +
-          '<div class="field" style="max-width:160px;"><label>Entregas a partir de</label><input type="text" id="cdHoraEntrega" placeholder="11:00" value="' + (cd ? escapeHtml(cd.horaEntrega || "") : "") + '"></div>' +
         '</div>' +
         '<div class="toolbar">' +
           '<button class="btn btn-primary btn-sm" id="btnCriarDia" ' + (cd ? "disabled" : "") + '>+ Criar cardápio para este dia</button>' +
@@ -1359,10 +1487,6 @@
       state.cardapio.push(copia);
       saveState(); showToast("Cardápio duplicado."); renderCardapio();
     });
-    var cdHoraLimite = mainEl.querySelector("#cdHoraLimite");
-    var cdHoraEntrega = mainEl.querySelector("#cdHoraEntrega");
-    if (cdHoraLimite) cdHoraLimite.addEventListener("change", function (e) { if (cd) { cd.horaLimite = e.target.value.trim(); saveState(); } });
-    if (cdHoraEntrega) cdHoraEntrega.addEventListener("change", function (e) { if (cd) { cd.horaEntrega = e.target.value.trim(); saveState(); } });
 
     mainEl.querySelectorAll("[data-addtam]").forEach(function (btn) {
       btn.addEventListener("click", function () {
@@ -1639,9 +1763,12 @@
     return parseFloat(m[1]);
   }
 
+  var SAUDACOES = { "bom dia": 1, "boa tarde": 1, "boa noite": 1, "boa madrugada": 1, "oi": 1, "ola": 1, "alo": 1, "eae": 1, "opa": 1, "oii": 1, "obrigado": 1, "obrigada": 1, "valeu": 1 };
+
   function pareceNomePessoa(linha) {
     var t = linha.trim();
     if (!t || t.split(/\s+/).length > 4) return false;
+    if (SAUDACOES[norm(t)]) return false;
     return /^[A-Za-zÀ-ÿ'.\s]+$/.test(t);
   }
 
@@ -1651,6 +1778,17 @@
     var t = norm(linha).replace(/[.\-–—:]/g, "").trim();
     if (!t || t.length > 4) return null;
     return grupo.tamanhos.find(function (tm) { return norm(tm.nome) === t; }) || null;
+  }
+
+  // Reconhece um trecho tipo "2 G", "2G" ou "2x G" — quantidade de marmitas + tamanho juntos,
+  // formato comum de quem digita pedidos rápido (ex.: atendente repassando um pedido por telefone).
+  function tamanhoEQtdPorTexto(parte, grupo) {
+    var t = norm(parte).replace(/[.\-–—:]/g, "").trim();
+    var m = t.match(/^(\d{1,2})\s*x?\s*([a-z]{1,4})$/i);
+    if (!m) return null;
+    var tam = grupo.tamanhos.find(function (tm) { return norm(tm.nome) === m[2]; });
+    if (!tam) return null;
+    return { tamanho: tam, quantidade: parseInt(m[1], 10) };
   }
 
   // Quando o cliente manda o pedido em várias mensagens separadas, e a pessoa cola o texto
@@ -1698,46 +1836,46 @@
       return true;
     }
 
-    var nome = "", telefone = "", endereco = "", valorDetectado = null, tamanhoDetectado = null;
+    var nome = "", telefone = "", endereco = "", valorDetectado = null, tamanhoDetectado = null, quantidadeDetectada = 1;
     var corpo = texto.trim();
     var mNome = corpo.match(/^\s*([A-Za-zÀ-ÿ' ]{2,30}?)\s*[-:–—]\s*([\s\S]+)/);
+
+    // Processa um trecho isolado (já separado por vírgula/traço/"e") tentando, nessa ordem:
+    // telefone, "2 G" (quantidade+tamanho juntos), só o tamanho, um valor sozinho, um endereço,
+    // um item do cardápio — e só se nada disso bater, considera candidato a nome do cliente.
+    function processarParte(parte, candidatosNome) {
+      var mTel = parte.match(TELEFONE_RE);
+      if (mTel) {
+        telefone = mTel[0];
+        parte = parte.replace(mTel[0], "").trim();
+        if (!parte) return; // sobrou só o telefone
+      }
+      var tq = tamanhoEQtdPorTexto(parte, grupo);
+      if (tq) { tamanhoDetectado = tq.tamanho; quantidadeDetectada = tq.quantidade; return; }
+      var tm = tamanhoPorNome(parte, grupo);
+      if (tm) { tamanhoDetectado = tm; return; }
+      if (pareceValorSozinho(parte)) { valorDetectado = extrairValor(parte); return; }
+      if (pareceEndereco(parte)) { endereco = parte; return; }
+      if (tentaCasarItem(parte)) return;
+      if (candidatosNome && pareceNomePessoa(parte)) candidatosNome.push(parte);
+    }
 
     if (mNome && mNome[1].indexOf("\n") === -1) {
       // Formato "Nome - item, item e item" — tudo numa linha ou bloco só.
       nome = mNome[1].trim();
       var corpoLinhas = mNome[2].replace(/\r?\n/g, ", ");
-      var partes = corpoLinhas.split(/\s*,\s*|\s+e\s+(?=\d)/i).map(function (s) { return s.trim(); }).filter(Boolean);
-      partes.forEach(function (parte) {
-        var mTel = parte.match(TELEFONE_RE);
-        if (mTel) {
-          telefone = mTel[0];
-          parte = parte.replace(mTel[0], "").trim();
-          if (!parte) return; // sobrou só o telefone
-        }
-        var tm = tamanhoPorNome(parte, grupo);
-        if (tm) { tamanhoDetectado = tm; return; }
-        if (pareceValorSozinho(parte)) { valorDetectado = extrairValor(parte); return; }
-        if (pareceEndereco(parte)) { endereco = parte; return; }
-        tentaCasarItem(parte);
-      });
+      var partes = corpoLinhas.split(/\s*,\s*|\s+-\s+|\s+e\s+(?=\d)/i).map(function (s) { return s.trim(); }).filter(Boolean);
+      partes.forEach(function (parte) { processarParte(parte, null); });
     } else {
-      // Formato de lista, um item (ou dado) por linha, sem marcação — ex.: cada ingrediente
-      // numa linha, seguido do valor e do nome do cliente ao final.
+      // Sem o formato "Nome - ...": pode vir uma lista com um dado por linha, ou várias
+      // informações juntas numa linha só, separadas por vírgula (ex.: "Bom dia, item, item,
+      // item - 2 G") — nos dois casos, cada linha ainda é quebrada por vírgula/traço antes de
+      // tentar reconhecer cada pedaço.
       var linhas = texto.split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean);
       var nomesCandidatos = [];
       linhas.forEach(function (linha) {
-        var mTel = linha.match(TELEFONE_RE);
-        if (mTel) {
-          telefone = mTel[0];
-          linha = linha.replace(mTel[0], "").trim();
-          if (!linha) return; // sobrou só o telefone
-        }
-        var tm = tamanhoPorNome(linha, grupo);
-        if (tm) { tamanhoDetectado = tm; return; }
-        if (pareceValorSozinho(linha)) { valorDetectado = extrairValor(linha); return; }
-        if (pareceEndereco(linha)) { endereco = linha; return; }
-        if (tentaCasarItem(linha)) return;
-        if (pareceNomePessoa(linha)) { nomesCandidatos.push(linha); return; }
+        var partesLinha = linha.split(/\s*,\s*|\s+-\s+|\s+e\s+(?=\d)/i).map(function (s) { return s.trim(); }).filter(Boolean);
+        partesLinha.forEach(function (parte) { processarParte(parte, nomesCandidatos); });
       });
       if (nomesCandidatos.length) nome = nomesCandidatos[nomesCandidatos.length - 1];
     }
@@ -1762,7 +1900,7 @@
       marmitas: [{
         grupoId: grupo.id, grupoNome: grupo.nome,
         tamanhoId: tamanho ? tamanho.id : null, tamanhoNome: tamanho ? tamanho.nome : null,
-        preco: tamanho ? tamanho.preco : 0, itensIds: itensIds
+        preco: tamanho ? tamanho.preco : 0, itensIds: itensIds, quantidade: quantidadeDetectada
       }]
     };
   }
@@ -1777,6 +1915,23 @@
     var n = norm(nome);
     var isProteina = PROTEINA_KEYWORDS.some(function (k) { return n.indexOf(k) !== -1; });
     return isProteina ? "proteina" : "guarnicao";
+  }
+
+  // Nem toda mensagem do WhatsApp vem com a marcação "(1 prot+4 guarniç)" explícita — muitas
+  // vezes o tamanho só tem o preço (ex.: "P R$25") e a quantidade de acompanhamentos fica
+  // implícita, pelo padrão de sempre da marmitaria. Quando não vier escrito no texto, assume
+  // essa regra padrão em vez de zerar, pra não precisar corrigir manualmente toda vez.
+  function guarnicoesPadraoPorTamanho(nome) {
+    var n = norm(nome);
+    if (n.indexOf("pequen") !== -1 || /^p\b/.test(n) || n === "p") return 4;
+    if (n.indexOf("grand") !== -1 || /^g\b/.test(n) || n === "g") return 6;
+    if (n.indexOf("medi") !== -1 || /^m\b/.test(n) || n === "m") return 5;
+    return 4;
+  }
+  function proteinasPadraoPorTamanho(nome) {
+    var n = norm(nome);
+    if (n.indexOf("grand") !== -1 || /^g\b/.test(n) || n === "g") return 2;
+    return 1;
   }
 
   var MESES_NOME = { janeiro: 1, fevereiro: 2, marco: 3, abril: 4, maio: 5, junho: 6, julho: 7, agosto: 8, setembro: 9, outubro: 10, novembro: 11, dezembro: 12 };
@@ -1870,8 +2025,8 @@
         grupoAtual.tamanhos.push({
           id: uid("tm"), nome: mTam[1].trim(),
           preco: isNaN(preco) ? 0 : preco,
-          proteinas: mTam[3] ? parseInt(mTam[3], 10) : 1,
-          guarnicoes: mTam[4] ? parseInt(mTam[4], 10) : 0
+          proteinas: mTam[3] ? parseInt(mTam[3], 10) : proteinasPadraoPorTamanho(mTam[1]),
+          guarnicoes: mTam[4] ? parseInt(mTam[4], 10) : guarnicoesPadraoPorTamanho(mTam[1])
         });
         return;
       }
@@ -1913,7 +2068,7 @@
             grupo.tamanhos.map(function (t) { return '<option value="' + t.id + '" ' + (m.tamanhoId === t.id ? "selected" : "") + '>' + escapeHtml(t.nome) + ' (' + money(t.preco) + ')</option>'; }).join("") +
             '</select>';
           return '<div class="cart-card" style="margin-bottom:10px;' + (m.tamanhoId ? '' : 'border-color:var(--warning);') + '"><div class="cart-card-top">' +
-            '<div class="cc-title">🍱 ' + escapeHtml(m.grupoNome) + ' ' + tamanhoField + (m.tamanhoId ? '' : '<span class="pill pill-warning">confirme o tamanho</span>') + '</div>' +
+            '<div class="cc-title">🍱 ' + (m.quantidade > 1 ? m.quantidade + '× ' : '') + escapeHtml(m.grupoNome) + ' ' + tamanhoField + (m.tamanhoId ? '' : '<span class="pill pill-warning">confirme o tamanho</span>') + '</div>' +
             '<div style="display:flex;align-items:center;gap:10px;"><span class="cc-sub">' + money(m.preco) + '</span>' +
             '<button class="btn btn-danger btn-sm" data-pv-del="' + idx + '">Remover</button></div></div>' +
             '<div style="margin-top:8px;">' + itensHtml + '</div></div>';
@@ -2007,7 +2162,7 @@
       importPreview.marmitas.forEach(function (m) {
         var grupo = cd.grupos.find(function (g) { return g.id === m.grupoId; });
         var escolhas = grupo.itens.filter(function (i) { return m.itensIds.indexOf(i.id) !== -1; }).map(function (i) { return i.nome; });
-        cart.push({ tipo: "marmita", grupoNome: m.grupoNome, tamanhoNome: m.tamanhoNome, preco: m.preco, qtd: 1, escolhas: escolhas });
+        cart.push({ tipo: "marmita", grupoNome: m.grupoNome, tamanhoNome: m.tamanhoNome, preco: m.preco, qtd: m.quantidade || 1, escolhas: escolhas });
       });
       cardapioData = importDataCardapio;
       if (importPreview.endereco) { cartEndereco = importPreview.endereco; cartTipo = "Entrega"; }
@@ -2358,7 +2513,11 @@
       linhasCsv.push(["", "", "", "", "Recebido", money(pago), "", "", ""].map(csvCampo).join(";"));
       linhasCsv.push(["", "", "", "", "A receber", money(pendente), "", "", ""].map(csvCampo).join(";"));
       var tituloPeriodo = periodo ? (fmtDate(relatorioDataInicio) + " a " + fmtDate(relatorioDataFim)) : fmtDate(relatorioData);
-      abrirExportModal("Relatório Arte Fogão — " + tituloPeriodo + "\n\n" + linhasCsv.join("\n"));
+      var conteudo = "Relatório Arte Fogão — " + tituloPeriodo + "\n\n" + linhasCsv.join("\n");
+      var nomeArquivo = "relatorio-arte-fogao-" + (periodo ? (relatorioDataInicio + "_a_" + relatorioDataFim) : relatorioData) + ".csv";
+      if (!baixarArquivoTexto(nomeArquivo, conteudo)) {
+        abrirExportModal(conteudo); // navegador bloqueou o download — cai no plano B de copiar/colar
+      }
     });
   }
 
