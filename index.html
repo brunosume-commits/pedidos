@@ -1435,8 +1435,6 @@
       '<div class="card">' +
         '<div class="field-row">' +
           '<div class="field" style="max-width:200px;"><label>Data do cardápio</label><input type="date" id="cdData" value="' + cardapioAdminData + '"></div>' +
-          '<div class="field" style="max-width:160px;"><label>Pedidos até</label><input type="text" id="cdHoraLimite" placeholder="09:00" value="' + (cd ? escapeHtml(cd.horaLimite || "") : "") + '"></div>' +
-          '<div class="field" style="max-width:160px;"><label>Entregas a partir de</label><input type="text" id="cdHoraEntrega" placeholder="11:00" value="' + (cd ? escapeHtml(cd.horaEntrega || "") : "") + '"></div>' +
         '</div>' +
         '<div class="toolbar">' +
           '<button class="btn btn-primary btn-sm" id="btnCriarDia" ' + (cd ? "disabled" : "") + '>+ Criar cardápio para este dia</button>' +
@@ -1489,10 +1487,6 @@
       state.cardapio.push(copia);
       saveState(); showToast("Cardápio duplicado."); renderCardapio();
     });
-    var cdHoraLimite = mainEl.querySelector("#cdHoraLimite");
-    var cdHoraEntrega = mainEl.querySelector("#cdHoraEntrega");
-    if (cdHoraLimite) cdHoraLimite.addEventListener("change", function (e) { if (cd) { cd.horaLimite = e.target.value.trim(); saveState(); } });
-    if (cdHoraEntrega) cdHoraEntrega.addEventListener("change", function (e) { if (cd) { cd.horaEntrega = e.target.value.trim(); saveState(); } });
 
     mainEl.querySelectorAll("[data-addtam]").forEach(function (btn) {
       btn.addEventListener("click", function () {
