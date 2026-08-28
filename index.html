@@ -1661,9 +1661,12 @@
     return parseFloat(m[1]);
   }
 
+  var SAUDACOES = { "bom dia": 1, "boa tarde": 1, "boa noite": 1, "boa madrugada": 1, "oi": 1, "ola": 1, "alo": 1, "eae": 1, "opa": 1, "oii": 1, "obrigado": 1, "obrigada": 1, "valeu": 1 };
+
   function pareceNomePessoa(linha) {
     var t = linha.trim();
     if (!t || t.split(/\s+/).length > 4) return false;
+    if (SAUDACOES[norm(t)]) return false;
     return /^[A-Za-zÀ-ÿ'.\s]+$/.test(t);
   }
 
@@ -1673,6 +1676,17 @@
     var t = norm(linha).replace(/[.\-–—:]/g, "").trim();
     if (!t || t.length > 4) return null;
     return grupo.tamanhos.find(function (tm) { return norm(tm.nome) === t; }) || null;
+  }
+
+  // Reconhece um trecho tipo "2 G", "2G" ou "2x G" — quantidade de marmitas + tamanho juntos,
+  // formato comum de quem digita pedidos rápido (ex.: atendente repassando um pedido por telefone).
+  function tamanhoEQtdPorTexto(parte, grupo) {
+    var t = norm(parte).replace(/[.\-–—:]/g, "").trim();
+    var m = t.match(/^(\d{1,2})\s*x?\s*([a-z]{1,4})$/i);
+    if (!m) return null;
+    var tam = grupo.tamanhos.find(function (tm) { return norm(tm.nome) === m[2]; });
+    if (!tam) return null;
+    return { tamanho: tam, quantidade: parseInt(m[1], 10) };
   }
 
   // Quando o cliente manda o pedido em várias mensagens separadas, e a pessoa cola o texto
@@ -1720,46 +1734,46 @@
       return true;
     }
 
-    var nome = "", telefone = "", endereco = "", valorDetectado = null, tamanhoDetectado = null;
+    var nome = "", telefone = "", endereco = "", valorDetectado = null, tamanhoDetectado = null, quantidadeDetectada = 1;
     var corpo = texto.trim();
     var mNome = corpo.match(/^\s*([A-Za-zÀ-ÿ' ]{2,30}?)\s*[-:–—]\s*([\s\S]+)/);
+
+    // Processa um trecho isolado (já separado por vírgula/traço/"e") tentando, nessa ordem:
+    // telefone, "2 G" (quantidade+tamanho juntos), só o tamanho, um valor sozinho, um endereço,
+    // um item do cardápio — e só se nada disso bater, considera candidato a nome do cliente.
+    function processarParte(parte, candidatosNome) {
+      var mTel = parte.match(TELEFONE_RE);
+      if (mTel) {
+        telefone = mTel[0];
+        parte = parte.replace(mTel[0], "").trim();
+        if (!parte) return; // sobrou só o telefone
+      }
+      var tq = tamanhoEQtdPorTexto(parte, grupo);
+      if (tq) { tamanhoDetectado = tq.tamanho; quantidadeDetectada = tq.quantidade; return; }
+      var tm = tamanhoPorNome(parte, grupo);
+      if (tm) { tamanhoDetectado = tm; return; }
+      if (pareceValorSozinho(parte)) { valorDetectado = extrairValor(parte); return; }
+      if (pareceEndereco(parte)) { endereco = parte; return; }
+      if (tentaCasarItem(parte)) return;
+      if (candidatosNome && pareceNomePessoa(parte)) candidatosNome.push(parte);
+    }
 
     if (mNome && mNome[1].indexOf("\n") === -1) {
       // Formato "Nome - item, item e item" — tudo numa linha ou bloco só.
       nome = mNome[1].trim();
       var corpoLinhas = mNome[2].replace(/\r?\n/g, ", ");
-      var partes = corpoLinhas.split(/\s*,\s*|\s+e\s+(?=\d)/i).map(function (s) { return s.trim(); }).filter(Boolean);
-      partes.forEach(function (parte) {
-        var mTel = parte.match(TELEFONE_RE);
-        if (mTel) {
-          telefone = mTel[0];
-          parte = parte.replace(mTel[0], "").trim();
-          if (!parte) return; // sobrou só o telefone
-        }
-        var tm = tamanhoPorNome(parte, grupo);
-        if (tm) { tamanhoDetectado = tm; return; }
-        if (pareceValorSozinho(parte)) { valorDetectado = extrairValor(parte); return; }
-        if (pareceEndereco(parte)) { endereco = parte; return; }
-        tentaCasarItem(parte);
-      });
+      var partes = corpoLinhas.split(/\s*,\s*|\s+-\s+|\s+e\s+(?=\d)/i).map(function (s) { return s.trim(); }).filter(Boolean);
+      partes.forEach(function (parte) { processarParte(parte, null); });
     } else {
-      // Formato de lista, um item (ou dado) por linha, sem marcação — ex.: cada ingrediente
-      // numa linha, seguido do valor e do nome do cliente ao final.
+      // Sem o formato "Nome - ...": pode vir uma lista com um dado por linha, ou várias
+      // informações juntas numa linha só, separadas por vírgula (ex.: "Bom dia, item, item,
+      // item - 2 G") — nos dois casos, cada linha ainda é quebrada por vírgula/traço antes de
+      // tentar reconhecer cada pedaço.
       var linhas = texto.split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean);
       var nomesCandidatos = [];
       linhas.forEach(function (linha) {
-        var mTel = linha.match(TELEFONE_RE);
-        if (mTel) {
-          telefone = mTel[0];
-          linha = linha.replace(mTel[0], "").trim();
-          if (!linha) return; // sobrou só o telefone
-        }
-        var tm = tamanhoPorNome(linha, grupo);
-        if (tm) { tamanhoDetectado = tm; return; }
-        if (pareceValorSozinho(linha)) { valorDetectado = extrairValor(linha); return; }
-        if (pareceEndereco(linha)) { endereco = linha; return; }
-        if (tentaCasarItem(linha)) return;
-        if (pareceNomePessoa(linha)) { nomesCandidatos.push(linha); return; }
+        var partesLinha = linha.split(/\s*,\s*|\s+-\s+|\s+e\s+(?=\d)/i).map(function (s) { return s.trim(); }).filter(Boolean);
+        partesLinha.forEach(function (parte) { processarParte(parte, nomesCandidatos); });
       });
       if (nomesCandidatos.length) nome = nomesCandidatos[nomesCandidatos.length - 1];
     }
@@ -1784,7 +1798,7 @@
       marmitas: [{
         grupoId: grupo.id, grupoNome: grupo.nome,
         tamanhoId: tamanho ? tamanho.id : null, tamanhoNome: tamanho ? tamanho.nome : null,
-        preco: tamanho ? tamanho.preco : 0, itensIds: itensIds
+        preco: tamanho ? tamanho.preco : 0, itensIds: itensIds, quantidade: quantidadeDetectada
       }]
     };
   }
@@ -1799,6 +1813,23 @@
     var n = norm(nome);
     var isProteina = PROTEINA_KEYWORDS.some(function (k) { return n.indexOf(k) !== -1; });
     return isProteina ? "proteina" : "guarnicao";
+  }
+
+  // Nem toda mensagem do WhatsApp vem com a marcação "(1 prot+4 guarniç)" explícita — muitas
+  // vezes o tamanho só tem o preço (ex.: "P R$25") e a quantidade de acompanhamentos fica
+  // implícita, pelo padrão de sempre da marmitaria. Quando não vier escrito no texto, assume
+  // essa regra padrão em vez de zerar, pra não precisar corrigir manualmente toda vez.
+  function guarnicoesPadraoPorTamanho(nome) {
+    var n = norm(nome);
+    if (n.indexOf("pequen") !== -1 || /^p\b/.test(n) || n === "p") return 4;
+    if (n.indexOf("grand") !== -1 || /^g\b/.test(n) || n === "g") return 6;
+    if (n.indexOf("medi") !== -1 || /^m\b/.test(n) || n === "m") return 5;
+    return 4;
+  }
+  function proteinasPadraoPorTamanho(nome) {
+    var n = norm(nome);
+    if (n.indexOf("grand") !== -1 || /^g\b/.test(n) || n === "g") return 2;
+    return 1;
   }
 
   var MESES_NOME = { janeiro: 1, fevereiro: 2, marco: 3, abril: 4, maio: 5, junho: 6, julho: 7, agosto: 8, setembro: 9, outubro: 10, novembro: 11, dezembro: 12 };
@@ -1892,8 +1923,8 @@
         grupoAtual.tamanhos.push({
           id: uid("tm"), nome: mTam[1].trim(),
           preco: isNaN(preco) ? 0 : preco,
-          proteinas: mTam[3] ? parseInt(mTam[3], 10) : 1,
-          guarnicoes: mTam[4] ? parseInt(mTam[4], 10) : 0
+          proteinas: mTam[3] ? parseInt(mTam[3], 10) : proteinasPadraoPorTamanho(mTam[1]),
+          guarnicoes: mTam[4] ? parseInt(mTam[4], 10) : guarnicoesPadraoPorTamanho(mTam[1])
         });
         return;
       }
@@ -1935,7 +1966,7 @@
             grupo.tamanhos.map(function (t) { return '<option value="' + t.id + '" ' + (m.tamanhoId === t.id ? "selected" : "") + '>' + escapeHtml(t.nome) + ' (' + money(t.preco) + ')</option>'; }).join("") +
             '</select>';
           return '<div class="cart-card" style="margin-bottom:10px;' + (m.tamanhoId ? '' : 'border-color:var(--warning);') + '"><div class="cart-card-top">' +
-            '<div class="cc-title">🍱 ' + escapeHtml(m.grupoNome) + ' ' + tamanhoField + (m.tamanhoId ? '' : '<span class="pill pill-warning">confirme o tamanho</span>') + '</div>' +
+            '<div class="cc-title">🍱 ' + (m.quantidade > 1 ? m.quantidade + '× ' : '') + escapeHtml(m.grupoNome) + ' ' + tamanhoField + (m.tamanhoId ? '' : '<span class="pill pill-warning">confirme o tamanho</span>') + '</div>' +
             '<div style="display:flex;align-items:center;gap:10px;"><span class="cc-sub">' + money(m.preco) + '</span>' +
             '<button class="btn btn-danger btn-sm" data-pv-del="' + idx + '">Remover</button></div></div>' +
             '<div style="margin-top:8px;">' + itensHtml + '</div></div>';
@@ -2029,7 +2060,7 @@
       importPreview.marmitas.forEach(function (m) {
         var grupo = cd.grupos.find(function (g) { return g.id === m.grupoId; });
         var escolhas = grupo.itens.filter(function (i) { return m.itensIds.indexOf(i.id) !== -1; }).map(function (i) { return i.nome; });
-        cart.push({ tipo: "marmita", grupoNome: m.grupoNome, tamanhoNome: m.tamanhoNome, preco: m.preco, qtd: 1, escolhas: escolhas });
+        cart.push({ tipo: "marmita", grupoNome: m.grupoNome, tamanhoNome: m.tamanhoNome, preco: m.preco, qtd: m.quantidade || 1, escolhas: escolhas });
       });
       cardapioData = importDataCardapio;
       if (importPreview.endereco) { cartEndereco = importPreview.endereco; cartTipo = "Entrega"; }
