@@ -445,6 +445,10 @@
   </div>
 </div>
 
+<div class="modal-backdrop" id="editarPedidoModalBackdrop">
+  <div class="modal" style="max-width:640px;"></div>
+</div>
+
 <div class="modal-backdrop" id="exportModalBackdrop">
   <div class="modal" style="max-width:640px;">
     <h3>📤 Exportar relatório</h3>
@@ -1205,6 +1209,7 @@
         '</select></td>' +
         '<td><div class="row-actions">' +
           '<button class="btn btn-secondary btn-sm" data-pagtoggle="' + p.id + '">' + (p.statusPagamento === "Pago" ? "Marcar pendente" : "Marcar pago") + '</button>' +
+          '<button class="btn btn-secondary btn-sm" data-editar="' + p.id + '">✏️ Editar</button>' +
           '<button class="btn btn-ghost btn-sm" data-print="' + p.id + '">🖨️ Imprimir</button>' +
           '<button class="btn btn-danger btn-sm" data-del="' + p.id + '">Excluir</button>' +
         '</div></td>' +
@@ -1240,6 +1245,9 @@
     mainEl.querySelectorAll("[data-print]").forEach(function (btn) {
       btn.addEventListener("click", function () { printReceipt(btn.getAttribute("data-print")); });
     });
+    mainEl.querySelectorAll("[data-editar]").forEach(function (btn) {
+      btn.addEventListener("click", function () { abrirEditarPedido(btn.getAttribute("data-editar")); });
+    });
     mainEl.querySelectorAll("[data-del]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         confirmarAcao("Excluir este pedido?", function () {
@@ -1249,6 +1257,106 @@
       });
     });
   }
+
+  // ---------------- Editar pedido (adicionar/remover item, ajustar taxa e observações) ----------------
+  // Trabalha numa cópia local do pedido — só grava de verdade em state.pedidos quando o usuário
+  // clica "Salvar alterações", pra não bagunçar o pedido original se ele desistir no meio.
+  var pedidoEditando = null;
+
+  function abrirEditarPedido(id) {
+    var p = state.pedidos.find(function (x) { return x.id === id; });
+    if (!p) return;
+    pedidoEditando = JSON.parse(JSON.stringify(p));
+    renderEditarPedidoModal();
+    document.getElementById("editarPedidoModalBackdrop").classList.add("show");
+  }
+
+  function fecharEditarPedidoModal() {
+    document.getElementById("editarPedidoModalBackdrop").classList.remove("show");
+    pedidoEditando = null;
+  }
+
+  function recalcularTotalEdicao() {
+    var totalItens = pedidoEditando.itens.reduce(function (s, i) { return s + i.preco * i.qtd; }, 0);
+    pedidoEditando.total = totalItens + (pedidoEditando.valorEntrega || 0);
+  }
+
+  function renderEditarPedidoModal() {
+    if (!pedidoEditando) return;
+    var p = pedidoEditando;
+    var itensHtml = p.itens.map(function (item, idx) {
+      var desc = item.tipo === "avulso" ? item.nome : (item.grupoNome + " " + item.tamanhoNome + (item.escolhas && item.escolhas.length ? ' <span class="muted" style="font-size:12px;">— ' + escapeHtml(item.escolhas.join(", ")) + '</span>' : ""));
+      return '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);">' +
+        '<div style="flex:1;font-size:13px;">' + (item.tipo === "avulso" ? escapeHtml(desc) : desc) + '</div>' +
+        '<input type="number" min="1" step="1" value="' + item.qtd + '" data-editqtd="' + idx + '" style="width:56px;">' +
+        '<span style="width:76px;text-align:right;font-size:13px;">' + money(item.preco) + '</span>' +
+        '<button class="btn btn-danger btn-sm" data-editdel="' + idx + '">Remover</button>' +
+      '</div>';
+    }).join("");
+
+    var modal = document.querySelector("#editarPedidoModalBackdrop .modal");
+    modal.innerHTML =
+      '<h3>✏️ Editar pedido #' + p.numero + ' — ' + escapeHtml(p.clienteNome) + '</h3>' +
+      '<div style="max-height:280px;overflow:auto;margin:10px 0;">' + (itensHtml || '<div class="muted" style="font-size:13px;">Nenhum item no pedido.</div>') + '</div>' +
+      '<div class="inline-add" style="margin-bottom:12px;">' +
+        '<div class="field" style="flex:2;"><label>Adicionar item</label><input type="text" id="editNovoItemNome" placeholder="Ex.: Refrigerante lata"></div>' +
+        '<div class="field small"><label>Preço (R$)</label><input type="number" id="editNovoItemPreco" min="0" step="0.5" placeholder="6.00"></div>' +
+        '<button class="btn btn-secondary btn-sm" id="btnEditAddItem">+ Adicionar</button>' +
+      '</div>' +
+      '<div class="field"><label>Taxa de entrega (R$)</label><input type="number" id="editValorEntrega" min="0" step="0.5" value="' + (p.valorEntrega || 0) + '"></div>' +
+      '<div class="field"><label>Observações</label><textarea id="editObs">' + escapeHtml(p.obs || "") + '</textarea></div>' +
+      '<div style="text-align:right;font-weight:700;font-size:17px;margin:12px 0;">Total: ' + money(p.total) + '</div>' +
+      '<div class="modal-actions">' +
+        '<button class="btn btn-ghost" id="editPedidoCancelar">Cancelar</button>' +
+        '<button class="btn btn-primary" id="editPedidoSalvar">Salvar alterações</button>' +
+      '</div>';
+
+    modal.querySelectorAll("[data-editqtd]").forEach(function (inp) {
+      inp.addEventListener("change", function () {
+        var idx = parseInt(inp.getAttribute("data-editqtd"), 10);
+        var v = parseInt(inp.value, 10);
+        pedidoEditando.itens[idx].qtd = (isNaN(v) || v < 1) ? 1 : v;
+        recalcularTotalEdicao();
+        renderEditarPedidoModal();
+      });
+    });
+    modal.querySelectorAll("[data-editdel]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var idx = parseInt(btn.getAttribute("data-editdel"), 10);
+        pedidoEditando.itens.splice(idx, 1);
+        recalcularTotalEdicao();
+        renderEditarPedidoModal();
+      });
+    });
+    modal.querySelector("#btnEditAddItem").addEventListener("click", function () {
+      var nome = modal.querySelector("#editNovoItemNome").value.trim();
+      var preco = parseFloat(modal.querySelector("#editNovoItemPreco").value);
+      if (!nome || isNaN(preco) || preco < 0) { showToast("Preencha o nome e o preço do item."); return; }
+      pedidoEditando.itens.push({ tipo: "avulso", nome: nome, preco: preco, qtd: 1 });
+      recalcularTotalEdicao();
+      renderEditarPedidoModal();
+    });
+    modal.querySelector("#editValorEntrega").addEventListener("change", function (e) {
+      var v = parseFloat(e.target.value);
+      pedidoEditando.valorEntrega = isNaN(v) ? 0 : v;
+      recalcularTotalEdicao();
+      renderEditarPedidoModal();
+    });
+    modal.querySelector("#editObs").addEventListener("input", function (e) { pedidoEditando.obs = e.target.value; });
+    modal.querySelector("#editPedidoCancelar").addEventListener("click", fecharEditarPedidoModal);
+    modal.querySelector("#editPedidoSalvar").addEventListener("click", function () {
+      var idxState = state.pedidos.findIndex(function (x) { return x.id === pedidoEditando.id; });
+      if (idxState !== -1) state.pedidos[idxState] = pedidoEditando;
+      saveState();
+      fecharEditarPedidoModal();
+      renderPedidos();
+      showToast("Pedido atualizado.");
+    });
+  }
+
+  document.getElementById("editarPedidoModalBackdrop").addEventListener("click", function (e) {
+    if (e.target === document.getElementById("editarPedidoModalBackdrop")) fecharEditarPedidoModal();
+  });
 
   // ================= Cardápio do dia (admin) =================
   function renderCardapio() {
