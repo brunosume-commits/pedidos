@@ -12,8 +12,18 @@ export default {
       return new Response("Method not allowed", { status: 405 });
     }
 
-    // Qualquer outra rota: serve os arquivos estáticos (public/index.html etc.)
-    return env.ASSETS.fetch(request);
+    // Qualquer outra rota: serve os arquivos estáticos (public/index.html etc.). O sistema
+    // é atualizado com frequência, então desligamos o cache da página principal — sem isso,
+    // tanto o navegador quanto a rede da Cloudflare podiam continuar servindo uma versão
+    // antiga por um tempo depois de um novo deploy.
+    const resp = await env.ASSETS.fetch(request);
+    const tipo = resp.headers.get("content-type") || "";
+    if (tipo.indexOf("text/html") !== -1) {
+      const semCache = new Response(resp.body, resp);
+      semCache.headers.set("Cache-Control", "no-store, must-revalidate");
+      return semCache;
+    }
+    return resp;
   }
 };
 
