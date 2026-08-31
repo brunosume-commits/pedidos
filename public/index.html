@@ -445,10 +445,6 @@
   </div>
 </div>
 
-<div class="modal-backdrop" id="editarPedidoModalBackdrop">
-  <div class="modal" style="max-width:640px;"></div>
-</div>
-
 <div class="modal-backdrop" id="exportModalBackdrop">
   <div class="modal" style="max-width:640px;">
     <h3>📤 Exportar relatório</h3>
@@ -612,6 +608,7 @@
   var cartStatusPag = "Pendente";
   var cartObs = "";
   var cartValorEntrega = 0;
+  var pedidoEditandoId = null;       // id do pedido em edição (via tela do PDV) — null = pedido novo
 
   var pedidosFiltroData = todayISO();
   var clientesBusca = "";
@@ -866,8 +863,12 @@
     var total = subtotalItens + taxaEntrega;
     var clienteAtual = state.clientes.find(function (c) { return c.id === cartCliente; });
 
+    var pedidoEmEdicao = pedidoEditandoId ? state.pedidos.find(function (x) { return x.id === pedidoEditandoId; }) : null;
+
     mainEl.innerHTML =
-      '<div class="page-head"><div><h2>PDV — Novo pedido</h2><div class="sub">' + fmtDate(hojeIso) + '</div></div></div>' +
+      '<div class="page-head"><div><h2>' + (pedidoEmEdicao ? "✏️ Editar pedido #" + pedidoEmEdicao.numero : "PDV — Novo pedido") + '</h2><div class="sub">' + fmtDate(hojeIso) + '</div></div>' +
+      (pedidoEmEdicao ? '<button class="btn btn-ghost" id="btnCancelarEdicao">Cancelar edição</button>' : '') +
+      '</div>' +
       '<div class="stat-row">' +
       '<div class="stat-card accent"><div class="label">Pedidos hoje</div><div class="value">' + hojePedidos.length + '</div></div>' +
       '<div class="stat-card brand2"><div class="label">Faturado hoje</div><div class="value">' + money(faturamentoHoje) + '</div></div>' +
@@ -907,7 +908,7 @@
               '<div class="field"><label>Pagamento</label><select id="selPagamento">' + PAGAMENTOS.map(function (p) { return '<option ' + (cartPagamento === p ? "selected" : "") + '>' + p + '</option>'; }).join("") + '</select></div>' +
               '<div class="field"><label>Status</label><select id="selStatusPag"><option ' + (cartStatusPag === "Pago" ? "selected" : "") + '>Pago</option><option ' + (cartStatusPag === "Pendente" ? "selected" : "") + '>Pendente</option></select></div>' +
             '</div>' +
-            '<button class="btn btn-primary btn-block" id="btnFinalizar" ' + (cart.length ? "" : "disabled") + '>Finalizar pedido — ' + money(total) + '</button>' +
+            '<button class="btn btn-primary btn-block" id="btnFinalizar" ' + (cart.length ? "" : "disabled") + '>' + (pedidoEmEdicao ? "Salvar alterações" : "Finalizar pedido") + ' — ' + money(total) + '</button>' +
           '</div>' +
         '</div>' +
       '</div>';
@@ -1028,6 +1029,8 @@
     mainEl.querySelector("#linkNovoCliente").addEventListener("click", function (e) { e.preventDefault(); openClienteModal(); });
     var btnF = mainEl.querySelector("#btnFinalizar");
     if (btnF) btnF.addEventListener("click", finalizarPedido);
+    var btnCancelarEdicao = mainEl.querySelector("#btnCancelarEdicao");
+    if (btnCancelarEdicao) btnCancelarEdicao.addEventListener("click", cancelarEdicaoPedido);
   }
 
   function finalizarPedido() {
@@ -1036,6 +1039,37 @@
     var subtotalItens = cart.reduce(function (s, c) { return s + c.qtd * c.preco; }, 0);
     var taxaEntrega = cartTipo === "Entrega" ? (cartValorEntrega || 0) : 0;
     var total = subtotalItens + taxaEntrega;
+    var itensFinal = cart.map(function (c) {
+      return c.tipo === "marmita"
+        ? { tipo: "marmita", grupoNome: c.grupoNome, tamanhoNome: c.tamanhoNome, qtd: c.qtd, preco: c.preco, escolhas: c.escolhas.slice() }
+        : { tipo: "avulso", nome: c.nome, qtd: c.qtd, preco: c.preco };
+    });
+
+    var pedidoExistente = pedidoEditandoId ? state.pedidos.find(function (x) { return x.id === pedidoEditandoId; }) : null;
+    if (pedidoExistente) {
+      // Edição: mantém id, número e horário original — só atualiza o conteúdo do pedido.
+      pedidoExistente.data = cardapioData;
+      pedidoExistente.clienteId = cliente ? cliente.id : null;
+      pedidoExistente.clienteNome = cliente ? cliente.nome : "Balcão";
+      pedidoExistente.telefone = cliente ? cliente.telefone : "";
+      pedidoExistente.endereco = cartTipo === "Entrega" ? cartEndereco : "";
+      pedidoExistente.itens = itensFinal;
+      pedidoExistente.valorEntrega = taxaEntrega;
+      pedidoExistente.total = total;
+      pedidoExistente.formaPagamento = cartPagamento;
+      pedidoExistente.statusPagamento = cartStatusPag;
+      pedidoExistente.tipoEntrega = cartTipo;
+      pedidoExistente.obs = cartObs;
+      saveState();
+      var numeroEditado = pedidoExistente.numero;
+      pedidoEditandoId = null;
+      cart = []; cartCliente = null; cartEndereco = ""; cartObs = ""; cartValorEntrega = 0; cartStatusPag = "Pendente"; cartPagamento = "Dinheiro"; cartTipo = "Entrega";
+      resetBuilder(false);
+      showToast("Pedido #" + numeroEditado + " atualizado!");
+      irPara("pedidos");
+      return;
+    }
+
     var now = new Date();
     var pedido = {
       id: uid("pd"), numero: state.nextNumero++, data: cardapioData,
@@ -1044,11 +1078,7 @@
       clienteNome: cliente ? cliente.nome : "Balcão",
       telefone: cliente ? cliente.telefone : "",
       endereco: cartTipo === "Entrega" ? cartEndereco : "",
-      itens: cart.map(function (c) {
-        return c.tipo === "marmita"
-          ? { tipo: "marmita", grupoNome: c.grupoNome, tamanhoNome: c.tamanhoNome, qtd: c.qtd, preco: c.preco, escolhas: c.escolhas.slice() }
-          : { tipo: "avulso", nome: c.nome, qtd: c.qtd, preco: c.preco };
-      }),
+      itens: itensFinal,
       valorEntrega: taxaEntrega,
       total: total, formaPagamento: cartPagamento, statusPagamento: cartStatusPag,
       tipoEntrega: cartTipo, statusPedido: "Em preparo", obs: cartObs
@@ -1258,105 +1288,36 @@
     });
   }
 
-  // ---------------- Editar pedido (adicionar/remover item, ajustar taxa e observações) ----------------
-  // Trabalha numa cópia local do pedido — só grava de verdade em state.pedidos quando o usuário
-  // clica "Salvar alterações", pra não bagunçar o pedido original se ele desistir no meio.
-  var pedidoEditando = null;
-
+  // ---------------- Editar pedido ----------------
+  // Editar um pedido reabre a própria tela do PDV (a mesma usada pra montar pedido novo), já
+  // carregada com os itens/cliente/entrega desse pedido — assim dá pra mudar tamanho, trocar
+  // proteína/guarnição, adicionar ou remover marmita inteira, etc., e não só itens avulsos.
+  // "pedidoEditandoId" marca que o carrinho atual pertence a esse pedido; ao finalizar, em vez
+  // de criar um pedido novo, atualiza o registro existente (mesmo número e horário).
   function abrirEditarPedido(id) {
     var p = state.pedidos.find(function (x) { return x.id === id; });
     if (!p) return;
-    pedidoEditando = JSON.parse(JSON.stringify(p));
-    renderEditarPedidoModal();
-    document.getElementById("editarPedidoModalBackdrop").classList.add("show");
+    pedidoEditandoId = p.id;
+    cart = JSON.parse(JSON.stringify(p.itens));
+    cartCliente = p.clienteId || null;
+    cartTipo = p.tipoEntrega || "Entrega";
+    cartEndereco = p.endereco || "";
+    cartPagamento = p.formaPagamento || "Dinheiro";
+    cartStatusPag = p.statusPagamento || "Pendente";
+    cartObs = p.obs || "";
+    cartValorEntrega = p.valorEntrega || 0;
+    cardapioData = p.data || todayISO();
+    resetBuilder(false);
+    irPara("pdv");
   }
 
-  function fecharEditarPedidoModal() {
-    document.getElementById("editarPedidoModalBackdrop").classList.remove("show");
-    pedidoEditando = null;
+  function cancelarEdicaoPedido() {
+    pedidoEditandoId = null;
+    cart = []; cartCliente = null; cartEndereco = ""; cartObs = ""; cartValorEntrega = 0;
+    cartStatusPag = "Pendente"; cartPagamento = "Dinheiro"; cartTipo = "Entrega";
+    resetBuilder(false);
+    irPara("pedidos");
   }
-
-  function recalcularTotalEdicao() {
-    var totalItens = pedidoEditando.itens.reduce(function (s, i) { return s + i.preco * i.qtd; }, 0);
-    pedidoEditando.total = totalItens + (pedidoEditando.valorEntrega || 0);
-  }
-
-  function renderEditarPedidoModal() {
-    if (!pedidoEditando) return;
-    var p = pedidoEditando;
-    var itensHtml = p.itens.map(function (item, idx) {
-      var desc = item.tipo === "avulso" ? item.nome : (item.grupoNome + " " + item.tamanhoNome + (item.escolhas && item.escolhas.length ? ' <span class="muted" style="font-size:12px;">— ' + escapeHtml(item.escolhas.join(", ")) + '</span>' : ""));
-      return '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);">' +
-        '<div style="flex:1;font-size:13px;">' + (item.tipo === "avulso" ? escapeHtml(desc) : desc) + '</div>' +
-        '<input type="number" min="1" step="1" value="' + item.qtd + '" data-editqtd="' + idx + '" style="width:56px;">' +
-        '<span style="width:76px;text-align:right;font-size:13px;">' + money(item.preco) + '</span>' +
-        '<button class="btn btn-danger btn-sm" data-editdel="' + idx + '">Remover</button>' +
-      '</div>';
-    }).join("");
-
-    var modal = document.querySelector("#editarPedidoModalBackdrop .modal");
-    modal.innerHTML =
-      '<h3>✏️ Editar pedido #' + p.numero + ' — ' + escapeHtml(p.clienteNome) + '</h3>' +
-      '<div style="max-height:280px;overflow:auto;margin:10px 0;">' + (itensHtml || '<div class="muted" style="font-size:13px;">Nenhum item no pedido.</div>') + '</div>' +
-      '<div class="inline-add" style="margin-bottom:12px;">' +
-        '<div class="field" style="flex:2;"><label>Adicionar item</label><input type="text" id="editNovoItemNome" placeholder="Ex.: Refrigerante lata"></div>' +
-        '<div class="field small"><label>Preço (R$)</label><input type="number" id="editNovoItemPreco" min="0" step="0.5" placeholder="6.00"></div>' +
-        '<button class="btn btn-secondary btn-sm" id="btnEditAddItem">+ Adicionar</button>' +
-      '</div>' +
-      '<div class="field"><label>Taxa de entrega (R$)</label><input type="number" id="editValorEntrega" min="0" step="0.5" value="' + (p.valorEntrega || 0) + '"></div>' +
-      '<div class="field"><label>Observações</label><textarea id="editObs">' + escapeHtml(p.obs || "") + '</textarea></div>' +
-      '<div style="text-align:right;font-weight:700;font-size:17px;margin:12px 0;">Total: ' + money(p.total) + '</div>' +
-      '<div class="modal-actions">' +
-        '<button class="btn btn-ghost" id="editPedidoCancelar">Cancelar</button>' +
-        '<button class="btn btn-primary" id="editPedidoSalvar">Salvar alterações</button>' +
-      '</div>';
-
-    modal.querySelectorAll("[data-editqtd]").forEach(function (inp) {
-      inp.addEventListener("change", function () {
-        var idx = parseInt(inp.getAttribute("data-editqtd"), 10);
-        var v = parseInt(inp.value, 10);
-        pedidoEditando.itens[idx].qtd = (isNaN(v) || v < 1) ? 1 : v;
-        recalcularTotalEdicao();
-        renderEditarPedidoModal();
-      });
-    });
-    modal.querySelectorAll("[data-editdel]").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        var idx = parseInt(btn.getAttribute("data-editdel"), 10);
-        pedidoEditando.itens.splice(idx, 1);
-        recalcularTotalEdicao();
-        renderEditarPedidoModal();
-      });
-    });
-    modal.querySelector("#btnEditAddItem").addEventListener("click", function () {
-      var nome = modal.querySelector("#editNovoItemNome").value.trim();
-      var preco = parseFloat(modal.querySelector("#editNovoItemPreco").value);
-      if (!nome || isNaN(preco) || preco < 0) { showToast("Preencha o nome e o preço do item."); return; }
-      pedidoEditando.itens.push({ tipo: "avulso", nome: nome, preco: preco, qtd: 1 });
-      recalcularTotalEdicao();
-      renderEditarPedidoModal();
-    });
-    modal.querySelector("#editValorEntrega").addEventListener("change", function (e) {
-      var v = parseFloat(e.target.value);
-      pedidoEditando.valorEntrega = isNaN(v) ? 0 : v;
-      recalcularTotalEdicao();
-      renderEditarPedidoModal();
-    });
-    modal.querySelector("#editObs").addEventListener("input", function (e) { pedidoEditando.obs = e.target.value; });
-    modal.querySelector("#editPedidoCancelar").addEventListener("click", fecharEditarPedidoModal);
-    modal.querySelector("#editPedidoSalvar").addEventListener("click", function () {
-      var idxState = state.pedidos.findIndex(function (x) { return x.id === pedidoEditando.id; });
-      if (idxState !== -1) state.pedidos[idxState] = pedidoEditando;
-      saveState();
-      fecharEditarPedidoModal();
-      renderPedidos();
-      showToast("Pedido atualizado.");
-    });
-  }
-
-  document.getElementById("editarPedidoModalBackdrop").addEventListener("click", function (e) {
-    if (e.target === document.getElementById("editarPedidoModalBackdrop")) fecharEditarPedidoModal();
-  });
 
   // ================= Cardápio do dia (admin) =================
   function renderCardapio() {
@@ -1823,21 +1784,82 @@
 
     var itensIds = [];
     var proteinaUnits = 0, guarnicaoUnits = 0;
+    // Tenta casar o trecho com um OU MAIS itens do cardápio de uma vez — necessário pra frases
+    // corridas sem vírgula tipo "estrogonofe de carne com arroz e batata palha", onde vários
+    // itens estão descritos na mesma frase. O limite de pontuação > 0.5 (e não >= 0.5) é
+    // proposital: evita que um item parecido mas errado (ex.: "Strogonoff de frango" numa frase
+    // que só menciona "carne") entre também, já que esse caso bate com pontuação exatamente 0.5.
     function tentaCasarItem(pedaco) {
       var mQtd = pedaco.match(/^(\d+)\s*x?\s+(.+)/i);
       var qty = 1, texto2 = pedaco;
       if (mQtd) { qty = parseInt(mQtd[1], 10); texto2 = mQtd[2]; }
       var tn = norm(texto2.replace(/\.$/, ""));
       if (!tn) return false;
-      var item = melhorItemParaTexto(grupo.itens, tn);
-      if (!item) return false;
-      if (itensIds.indexOf(item.id) === -1) itensIds.push(item.id);
-      if (item.tipo === "proteina") proteinaUnits += qty; else guarnicaoUnits += qty;
-      return true;
+      var achouAlgum = false;
+      grupo.itens.forEach(function (item) {
+        var score = pontuarItem(norm(item.nome), tn);
+        if (score > 0.5) {
+          if (itensIds.indexOf(item.id) === -1) itensIds.push(item.id);
+          if (item.tipo === "proteina") proteinaUnits += qty; else guarnicaoUnits += qty;
+          achouAlgum = true;
+        }
+      });
+      if (!achouAlgum) {
+        // fallback: nenhum item bateu > 0.5 — tenta o antigo "melhor único" pra não perder casos
+        // legítimos que batiam exatamente em 0.5 ou que só a busca por melhor pontuação pegava.
+        var item2 = melhorItemParaTexto(grupo.itens, tn);
+        if (item2) {
+          if (itensIds.indexOf(item2.id) === -1) itensIds.push(item2.id);
+          if (item2.tipo === "proteina") proteinaUnits += qty; else guarnicaoUnits += qty;
+          achouAlgum = true;
+        }
+      }
+      return achouAlgum;
     }
 
     var nome = "", telefone = "", endereco = "", valorDetectado = null, tamanhoDetectado = null, quantidadeDetectada = 1;
     var corpo = texto.trim();
+
+    // Formato "Quero 02 X sendo 01 P e 01 G" — o cliente pede várias marmitas de UMA VEZ, mas de
+    // TAMANHOS DIFERENTES entre si. Nesse caso a palavra "sendo" separa a descrição dos itens
+    // (antes) da divisão por tamanho (depois). Se reconhecer 2+ tamanhos ali, retorna uma
+    // marmita PARA CADA tamanho encontrado, todas com os mesmos itens.
+    var mSendo = corpo.match(/\bsendo\b\s*[:]?\s*([\s\S]+)$/i);
+    if (mSendo) {
+      var antesSendo = corpo.slice(0, mSendo.index);
+      var depoisSendo = mSendo[1];
+      var nomesCandidatosSendo = [];
+      antesSendo.split(/\r?\n/).forEach(function (linha) {
+        linha.split(/\s*,\s*|\s+-\s+|\s+e\s+(?=\d)/i).map(function (s) { return s.trim(); }).filter(Boolean)
+          .forEach(function (parte) { processarParte(parte, nomesCandidatosSendo); });
+      });
+      var tamanhosEncontrados = [];
+      depoisSendo.split(/\r?\n|\s*,\s*|\s+e\s+/i).map(function (s) { return s.trim(); }).filter(Boolean)
+        .forEach(function (pedaco) {
+          var tq = tamanhoEQtdPorTexto(pedaco, grupo);
+          if (tq) { tamanhosEncontrados.push(tq); return; }
+          var tm = tamanhoPorNome(pedaco, grupo);
+          if (tm) { tamanhosEncontrados.push({ tamanho: tm, quantidade: 1 }); return; }
+          if (nomesCandidatosSendo && pareceNomePessoa(pedaco)) nomesCandidatosSendo.push(pedaco);
+        });
+      if (tamanhosEncontrados.length >= 2 && itensIds.length) {
+        var nomeSendo = nomesCandidatosSendo.length ? nomesCandidatosSendo[nomesCandidatosSendo.length - 1] : "";
+        return {
+          nomeDetectado: nomeSendo,
+          telefone: telefone,
+          endereco: endereco,
+          marmitas: tamanhosEncontrados.map(function (tq) {
+            return {
+              grupoId: grupo.id, grupoNome: grupo.nome,
+              tamanhoId: tq.tamanho.id, tamanhoNome: tq.tamanho.nome,
+              preco: tq.tamanho.preco, itensIds: itensIds.slice(), quantidade: tq.quantidade
+            };
+          })
+        };
+      }
+      // Não achou 2+ tamanhos distintos (ou nenhum item) — não é o caso "sendo", segue o fluxo normal.
+    }
+
     var mNome = corpo.match(/^\s*([A-Za-zÀ-ÿ' ]{2,30}?)\s*[-:–—]\s*([\s\S]+)/);
 
     // Processa um trecho isolado (já separado por vírgula/traço/"e") tentando, nessa ordem:
